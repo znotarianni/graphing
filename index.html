@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Plotter</title>
+<style>
+:root{--bg:#eef2f1;--pn:#fff;--tx:#1b2624;--mu:#63726f;--bd:#d5dddb;--ac:#0e7c86;--gr:#e6ebea}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1516;--pn:#182021;--tx:#e3ebe9;--mu:#8a9c98;--bd:#2a3634;--ac:#3fb6c0;--gr:#243030}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;font:14px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--tx);display:grid;grid-template-columns:320px 1fr;height:100vh}
+aside{background:var(--pn);border-right:1px solid var(--bd);padding:16px;overflow:auto;display:flex;flex-direction:column;gap:16px}
+h1{font-size:19px;margin:0;font-weight:650}
+section{display:flex;flex-direction:column;gap:6px}
+label{font-size:13px;color:var(--mu);font-weight:600}
+select,input:not([type=checkbox]):not([type=range]){width:100%;padding:7px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx);font:inherit}
+select:focus-visible,input:focus-visible,button:focus-visible{outline:2px solid var(--ac);outline-offset:1px}
+button{padding:8px 12px;border:1px solid var(--bd);border-radius:6px;background:var(--pn);color:var(--tx);cursor:pointer;font:inherit}
+button:hover{border-color:var(--ac)}.pri{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:600}
+#drop{border:2px dashed var(--bd);border-radius:8px;padding:18px;text-align:center;cursor:pointer;color:var(--mu)}
+#drop.on,#drop:hover{border-color:var(--ac);color:var(--ac)}
+#info{font-size:13px;color:var(--mu)}
+#ys{max-height:190px;overflow:auto;border:1px solid var(--bd);border-radius:6px;padding:4px 8px}
+.ck{display:flex;gap:7px;align-items:center;color:var(--tx);font-weight:400;padding:2px 0;cursor:pointer}
+.row{display:flex;gap:6px}
+input[type=range]{width:100%;accent-color:var(--ac)}
+main{position:relative;min-width:0}
+#cv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+#sel{position:absolute;display:none;background:color-mix(in srgb,var(--ac) 20%,transparent);border:1px solid var(--ac);pointer-events:none}
+@media(max-width:800px){body{grid-template-columns:1fr;grid-template-rows:auto 70vh;height:auto}}
+</style></head><body>
+<aside>
+<h1>Plotter</h1>
+<section>
+ <div id="drop" tabindex="0">Drop a CSV, TSV or JSON file<br><small>or click to browse</small></div>
+ <input type="file" id="file" hidden>
+ <div id="srv" hidden><label for="sf">Files on the server</label><select id="sf"></select></div>
+ <div id="info"></div>
+</section>
+<section>
+ <label for="type">Chart type</label>
+ <select id="type"><option value="line">Line</option><option value="scatter">Scatter</option><option value="both">Scatter + line</option><option value="step">Step</option><option value="area">Area</option><option value="bar">Bar</option><option value="hist">Histogram</option><option value="box">Box plot</option></select>
+ <label for="x">X axis (time, position, ...)</label><select id="x"></select>
+ <label for="q">Y columns</label><input id="q" placeholder="Search columns"><div id="ys"></div>
+ <label for="g">Group / color by</label><select id="g"></select>
+</section>
+<section>
+ <label>Window on the X axis</label>
+ <div class="row"><input id="lo" aria-label="Window start"><input id="hi" aria-label="Window end"></div>
+ <input type="range" id="sl" min="0" max="1000" value="0" aria-label="Start slider">
+ <input type="range" id="sh" min="0" max="1000" value="1000" aria-label="End slider">
+ <button id="rs">Reset window</button>
+ <small style="color:var(--mu)">Tip: drag on the chart to zoom, double-click to reset.</small>
+</section>
+<section>
+ <label for="ti">Title</label><input id="ti">
+ <label class="ck"><input type="checkbox" id="lg"> Log scale on Y</label>
+ <label for="bn">Histogram bins</label><input id="bn" type="number" value="30" min="2" max="500">
+</section>
+<button id="go" class="pri">Generate chart</button>
+<div class="row"><button id="png" style="flex:1">Save PNG</button><button id="csv" style="flex:1">Save window as CSV</button></div>
+</aside>
+<main><canvas id="cv"></canvas><div id="sel"></div></main>
+<script>
+const $=s=>document.querySelector(s),PAL=['#0e7c86','#e8590c','#5c7cfa','#2f9e44','#ae3ec9','#f08c00','#c92a2a','#495057','#12b886'];
+const esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+let D=null,lo=0,hi=1,xr=[0,1],G={},ds=null,raf;
+const go=()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(draw)};
+const info=t=>$('#info').textContent=t;
+
+/* ---------- parsing ---------- */
+function parseCSV(t){
+ if(t.charCodeAt(0)===65279)t=t.slice(1);
+ const nl=t.indexOf('\n'),first=t.slice(0,nl>0?nl:t.length);
+ const d=[',','\t',';','|'].map(c=>[c,first.split(c).length]).sort((a,b)=>b[1]-a[1])[0][0];
+ const rows=[];let r=[],f='',q=false;
+ for(let i=0;i<t.length;i++){const c=t[i];
+  if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}
+  else if(c=='"')q=true;
+  else if(c==d){r.push(f);f=''}
+  else if(c=='\n'||c=='\r'){if(c=='\r'&&t[i+1]=='\n')i++;r.push(f);f='';rows.push(r);r=[]}
+  else f+=c}
+ if(f!==''||r.length){r.push(f);rows.push(r)}
+ return rows.filter(x=>x.length>1||x[0]!=='');
+}
+const isD=s=>/^\d{4}-\d\d-\d\d|^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s);
+const pd=s=>{s=s.replace(' ','T');return Date.parse(/T/.test(s)&&!/(Z|[+-]\d\d:?\d\d)$/i.test(s)?s+'Z':s)};
+function build(rows){
+ const h=rows[0].map((x,i)=>String(x).trim()||'col'+i),n=rows.length-1,cols=[];
+ h.forEach((name,j)=>{
+  const raw=new Array(n),a=new Float64Array(n),b=new Float64Array(n);
+  for(let i=0;i<n;i++)raw[i]=String(rows[i+1][j]??'').trim();
+  let num=true,dt=true;
+  for(let i=0;i<n&&(num||dt);i++){const s=raw[i];
+   if(s===''||s.toLowerCase()==='nan'){a[i]=b[i]=NaN;continue}
+   if(num){const v=+s;if(isNaN(v))num=false;else a[i]=v}
+   if(dt){const v=isD(s)?pd(s):NaN;if(isNaN(v))dt=false;else b[i]=v}}
+  cols.push(num?{name,v:a,kind:'num'}:dt?{name,v:b,kind:'time'}:{name,s:raw,kind:'cat'});
+ });
+ return{n,cols};
+}
+function load(name,text){
+ let rows;
+ try{
+  if(/\.json$/i.test(name)){const j=JSON.parse(text);
+   if(Array.isArray(j)){const k=[...new Set(j.flatMap(o=>Object.keys(o)))];rows=[k,...j.map(o=>k.map(x=>o[x]))]}
+   else{const k=Object.keys(j),m=Math.max(...k.map(x=>j[x].length));rows=[k,...Array.from({length:m},(_,i)=>k.map(x=>j[x][i]))]}}
+  else rows=parseCSV(text);
+  D=build(rows);
+ }catch(e){info('Could not read this file: '+e.message);return}
+ const C=D.cols;
+ $('#x').innerHTML='<option value="-1">Row index</option>'+C.map((c,i)=>c.kind!='cat'?`<option value="${i}">${esc(c.name)}</option>`:'').join('');
+ $('#g').innerHTML='<option value="-1">None</option>'+C.map((c,i)=>c.kind=='cat'?`<option value="${i}">${esc(c.name)}</option>`:'').join('');
+ let xi=C.findIndex(c=>c.kind=='time');if(xi<0)xi=C.findIndex(c=>c.kind=='num');
+ $('#x').value=xi;
+ const yi=C.findIndex((c,i)=>c.kind=='num'&&i!=xi);
+ $('#ys').innerHTML=C.map((c,i)=>c.kind=='num'?`<label class="ck"><input type="checkbox" value="${i}"${i==yi?' checked':''}> ${esc(c.name)}</label>`:'').join('');
+ info(`${name}: ${D.n.toLocaleString()} rows, ${C.length} columns`);
+ calcXR();go();
+}
+async function openF(f){
+ if(/\.(h5|hdf5|hdf)$/i.test(f.name))return info('HDF5 files are not supported yet. Export the data to CSV first.');
+ info('Reading '+f.name+'...');load(f.name,await f.text());
+}
+
+/* ---------- selection helpers ---------- */
+const xcol=()=>{const i=+$('#x').value;return i<0||!D?null:D.cols[i]};
+const gcol=()=>{const i=+$('#g').value;return i<0||!D?null:D.cols[i]};
+const ycols=()=>[...document.querySelectorAll('#ys input:checked')].map(e=>D.cols[+e.value]);
+const fw=v=>{const x=xcol();return x&&x.kind=='time'?new Date(v).toISOString().slice(0,19)+'Z':''+ +v.toPrecision(10)};
+const pv=s=>{const x=xcol();return x&&x.kind=='time'?pd(s):+s};
+function setWin(a,b){lo=a;hi=b;$('#lo').value=fw(a);$('#hi').value=fw(b);const w=xr[1]-xr[0];$('#sl').value=(a-xr[0])/w*1000;$('#sh').value=(b-xr[0])/w*1000}
+function calcXR(){
+ const x=xcol();let a=Infinity,b=-Infinity;
+ if(!x){a=0;b=D.n-1}else for(const v of x.v){if(v<a)a=v;if(v>b)b=v}
+ if(!isFinite(a)){a=0;b=1}if(a===b)b=a+1;xr=[a,b];setWin(a,b);
+}
+function series(){
+ const x=xcol(),g=gcol(),ys=ycols(),out=[];
+ const keys=g?[...new Set(g.s)].slice(0,12):[null];
+ for(const y of ys)for(const k of keys){
+  const X=[],Y=[];
+  for(let i=0;i<D.n;i++){const xv=x?x.v[i]:i;
+   if(!(xv>=lo&&xv<=hi))continue;if(g&&g.s[i]!==k)continue;
+   const v=y.v[i];if(v!==v)continue;X.push(xv);Y.push(v)}
+  out.push({name:k==null?y.name:ys.length>1?y.name+' / '+k:k,X,Y,c:PAL[out.length%PAL.length]});
+ }
+ return out;
+}
+
+/* ---------- drawing ---------- */
+const fmt=v=>v!==0&&(Math.abs(v)>=1e6||Math.abs(v)<1e-3)?v.toExponential(2):''+ +v.toPrecision(6);
+const tm=(v,s)=>{const i=new Date(v).toISOString();return s>1728e5?i.slice(0,10):s<6e4?i.slice(11,23):i.slice(5,19).replace('T',' ')};
+function ticks(a,b,n){const s=(b-a)/n,p=10**Math.floor(Math.log10(s)),f=s/p,st=(f<1.5?1:f<3?2:f<7?5:10)*p,o=[];
+ for(let v=Math.ceil(a/st)*st;v<=b+st*1e-9;v+=st)o.push(+v.toPrecision(12));return o}
+function decim(X,Y,x0,x1,w){
+ if(X.length<w*4)return[X,Y];
+ const ox=[],oy=[];let b=-1,mn,mx,imn,imx;
+ const fl=()=>{if(b<0)return;if(imn<=imx){ox.push(X[imn],X[imx]);oy.push(mn,mx)}else{ox.push(X[imx],X[imn]);oy.push(mx,mn)}};
+ for(let i=0;i<X.length;i++){const p=Math.floor((X[i]-x0)/(x1-x0)*w);
+  if(p!==b){fl();b=p;mn=mx=Y[i];imn=imx=i}else{if(Y[i]<mn){mn=Y[i];imn=i}if(Y[i]>mx){mx=Y[i];imx=i}}}
+ fl();return[ox,oy];
+}
+const qt=(a,p)=>{const i=(a.length-1)*p,f=Math.floor(i);return a[f]+(a[Math.min(f+1,a.length-1)]-a[f])*(i-f)};
+function draw(){
+ const cv=$('#cv'),W=cv.clientWidth,H=cv.clientHeight,dp=devicePixelRatio||1;
+ cv.width=W*dp;cv.height=H*dp;const c=cv.getContext('2d');c.setTransform(dp,0,0,dp,0,0);
+ const st=getComputedStyle(document.body),V=n=>st.getPropertyValue(n).trim(),tx=V('--tx'),mu=V('--mu'),gr=V('--gr');
+ c.fillStyle=V('--pn');c.fillRect(0,0,W,H);
+ const say=t=>{c.fillStyle=mu;c.textAlign='center';c.textBaseline='middle';c.font='15px system-ui,sans-serif';c.fillText(t,W/2,H/2)};
+ G={zoom:false};
+ if(!D)return say('Drop a data file on the left to start');
+ const S=series();
+ if(!S.length)return say('Pick at least one Y column');
+ if(S.every(s=>!s.X.length))return say('No data inside this window. Reset the window to see everything.');
+ const type=$('#type').value,log=$('#lg').checked&&type!='hist',title=$('#ti').value,xc=xcol();
+ const L=72,R=20,T=title?44:22,B=50,pw=W-L-R,ph=H-T-B,ty=v=>log?Math.log10(v):v;
+ let x0=lo,x1=hi,y0=Infinity,y1=-Infinity,box=[],hist=[],nb=Math.max(2,Math.min(500,+$('#bn').value||30));
+ const ext=v=>{if(log&&v<=0)return;v=ty(v);if(v<y0)y0=v;if(v>y1)y1=v};
+ if(type=='hist'){
+  let a=Infinity,b=-Infinity;for(const s of S)for(const v of s.Y){if(v<a)a=v;if(v>b)b=v}
+  if(a===b)b=a+1;x0=a;x1=b;let m=0;
+  hist=S.map(s=>{const k=new Array(nb).fill(0);for(const v of s.Y)k[Math.min(nb-1,Math.floor((v-a)/(b-a)*nb))]++;m=Math.max(m,...k);return k});
+  y0=0;y1=m*1.05||1;
+ }else if(type=='box'){
+  x0=0;x1=S.length;
+  box=S.map(s=>{const a=Float64Array.from(log?s.Y.filter(v=>v>0):s.Y).sort();if(!a.length)return null;
+   const q1=qt(a,.25),md=qt(a,.5),q3=qt(a,.75),i=q3-q1,lw=a.find(v=>v>=q1-1.5*i),uw=[...a].reverse().find(v=>v<=q3+1.5*i);
+   const out=a.filter(v=>v<lw||v>uw).slice(0,500);[lw,uw,...out].forEach(ext);return{q1,md,q3,lw,uw,out}});
+ }else{
+  if(x0===x1){x0-=1;x1+=1}
+  S.forEach(s=>s.Y.forEach(ext));if(type=='area'||type=='bar')ext(log?1:0);
+ }
+ if(!isFinite(y0)){y0=0;y1=1}
+ if(type!='hist'){if(y0===y1){y0-=1;y1+=1}const p=(y1-y0)*.05;y0-=p;y1+=p}
+ const px=v=>L+(v-x0)/(x1-x0)*pw,py=v=>T+ph-(ty(v)-y0)/(y1-y0)*ph;
+ G={L,T,pw,ph,x0,x1,type,zoom:!/^(hist|box)$/.test(type)};
+ const sp=x1-x0,fx=type!='hist'&&xc&&xc.kind=='time'?v=>tm(v,sp):fmt;
+ c.font='12px system-ui,sans-serif';c.lineWidth=1;c.strokeStyle=gr;c.fillStyle=mu;c.textAlign='right';c.textBaseline='middle';
+ for(const t of ticks(y0,y1,Math.max(2,ph/50|0))){const y=T+ph-(t-y0)/(y1-y0)*ph;c.beginPath();c.moveTo(L,y);c.lineTo(L+pw,y);c.stroke();c.fillText(fmt(log?10**t:t),L-8,y)}
+ c.textAlign='center';c.textBaseline='top';
+ if(type=='box')S.forEach((s,i)=>c.fillText(s.name.slice(0,18),px(i+.5),T+ph+8));
+ else for(const t of ticks(x0,x1,Math.max(2,pw/110|0))){const x=px(t);c.beginPath();c.moveTo(x,T);c.lineTo(x,T+ph);c.stroke();c.fillText(fx(t),x,T+ph+8)}
+ c.fillStyle=tx;c.font='13px system-ui,sans-serif';
+ const xl=type=='hist'?'Value':type=='box'?'':xc?xc.name:'Row index',yn=[...new Set(ycols().map(y=>y.name))].join(', ');
+ c.fillText(xl,L+pw/2,H-20);
+ c.save();c.translate(16,T+ph/2);c.rotate(-Math.PI/2);c.textBaseline='top';c.fillText(type=='hist'?'Count':yn.slice(0,50),0,0);c.restore();
+ if(title){c.font='600 15px system-ui,sans-serif';c.textBaseline='top';c.fillText(title,L+pw/2,14)}
+ c.save();c.beginPath();c.rect(L,T,pw,ph);c.clip();
+ const zy=py(log?10**y0:0);
+ S.forEach((s,i)=>{
+  c.strokeStyle=c.fillStyle=s.c;let X=s.X,Y=s.Y;
+  if(type=='hist'){c.globalAlpha=.55;const w=pw/nb;hist[i].forEach((k,j)=>{const y=T+ph-k/(y1-y0)*ph;c.fillRect(L+j*w,y,w-1,T+ph-y)});c.globalAlpha=1;return}
+  if(type=='box'){const b=box[i];if(!b)return;const cx=px(i+.5),h=Math.min(60,pw/S.length*.25);
+   c.lineWidth=1.5;c.beginPath();c.moveTo(cx,py(b.lw));c.lineTo(cx,py(b.uw));c.moveTo(cx-h/2,py(b.lw));c.lineTo(cx+h/2,py(b.lw));c.moveTo(cx-h/2,py(b.uw));c.lineTo(cx+h/2,py(b.uw));c.stroke();
+   c.globalAlpha=.25;c.fillRect(cx-h,py(b.q3),2*h,py(b.q1)-py(b.q3));c.globalAlpha=1;c.strokeRect(cx-h,py(b.q3),2*h,py(b.q1)-py(b.q3));
+   c.lineWidth=3;c.beginPath();c.moveTo(cx-h,py(b.md));c.lineTo(cx+h,py(b.md));c.stroke();
+   b.out.forEach(v=>{c.beginPath();c.arc(cx,py(v),2.5,0,7);c.stroke()});return}
+  if(log){const k=[];Y.forEach((v,j)=>v>0&&k.push(j));X=k.map(j=>s.X[j]);Y=k.map(j=>s.Y[j])}
+  if(/^(line|both|step|area)$/.test(type)){
+   const[X2,Y2]=type=='line'||type=='area'?decim(X,Y,x0,x1,pw):[X,Y];
+   c.lineWidth=1.6;c.beginPath();
+   X2.forEach((x,j)=>{const a=px(x),b=py(Y2[j]);if(!j)c.moveTo(a,b);else{if(type=='step')c.lineTo(a,py(Y2[j-1]));c.lineTo(a,b)}});c.stroke();
+   if(type=='area'&&X2.length){c.lineTo(px(X2[X2.length-1]),zy);c.lineTo(px(X2[0]),zy);c.closePath();c.globalAlpha=.18;c.fill();c.globalAlpha=1}
+  }
+  if(type=='scatter'||type=='both'){c.globalAlpha=X.length>5e4?.35:.8;const r=type=='both'?2.2:2;for(let j=0;j<X.length;j++)c.fillRect(px(X[j])-r,py(Y[j])-r,2*r,2*r);c.globalAlpha=1}
+  if(type=='bar'){const w=Math.max(1,Math.min(40,pw/X.length*.8));c.globalAlpha=.8;X.forEach((x,j)=>{const y=py(Y[j]);c.fillRect(px(x)-w/2,Math.min(y,zy),w,Math.abs(zy-y))});c.globalAlpha=1}
+ });
+ c.restore();
+ c.strokeStyle=V('--bd');c.strokeRect(L,T,pw,ph);
+ if(S.length>1&&type!='box'){c.font='12px system-ui,sans-serif';c.textAlign='left';c.textBaseline='middle';
+  S.slice(0,12).forEach((s,i)=>{c.fillStyle=s.c;c.fillRect(L+10,T+10+i*17,10,10);c.fillStyle=tx;c.fillText(s.name.slice(0,30),L+26,T+15+i*17)})}
+}
+
+/* ---------- events ---------- */
+const dz=$('#drop');
+dz.onclick=()=>$('#file').click();dz.onkeydown=e=>e.key=='Enter'&&$('#file').click();
+$('#file').onchange=e=>e.target.files[0]&&openF(e.target.files[0]);
+dz.ondragover=e=>{e.preventDefault();dz.classList.add('on')};dz.ondragleave=()=>dz.classList.remove('on');
+dz.ondrop=e=>{e.preventDefault();dz.classList.remove('on');e.dataTransfer.files[0]&&openF(e.dataTransfer.files[0])};
+['type','g','lg','bn','ti'].forEach(id=>$('#'+id).oninput=go);
+$('#ys').onchange=go;$('#go').onclick=draw;
+$('#x').onchange=()=>{calcXR();go()};
+$('#rs').onclick=cv_reset;$('#cv').ondblclick=cv_reset;
+function cv_reset(){if(D){setWin(xr[0],xr[1]);go()}}
+$('#q').oninput=e=>{const s=e.target.value.toLowerCase();document.querySelectorAll('#ys .ck').forEach(l=>l.hidden=!l.textContent.toLowerCase().includes(s))};
+$('#lo').onchange=$('#hi').onchange=()=>{const a=pv($('#lo').value),b=pv($('#hi').value);if(isNaN(a)||isNaN(b)||a>=b)return setWin(lo,hi);setWin(a,b);go()};
+$('#sl').oninput=$('#sh').oninput=()=>{const w=xr[1]-xr[0];let a=xr[0]+w*$('#sl').value/1000,b=xr[0]+w*$('#sh').value/1000;if(a>b)[a,b]=[b,a];lo=a;hi=b;$('#lo').value=fw(a);$('#hi').value=fw(b);go()};
+const cv=$('#cv'),sel=$('#sel');
+cv.onmousedown=e=>{const x=e.clientX-cv.getBoundingClientRect().left;if(G.zoom&&x>=G.L&&x<=G.L+G.pw)ds=x};
+addEventListener('mousemove',e=>{if(ds==null)return;const x=Math.max(G.L,Math.min(G.L+G.pw,e.clientX-cv.getBoundingClientRect().left));
+ Object.assign(sel.style,{display:'block',left:Math.min(ds,x)+'px',width:Math.abs(x-ds)+'px',top:G.T+'px',height:G.ph+'px'})});
+addEventListener('mouseup',e=>{if(ds==null)return;const x=Math.max(G.L,Math.min(G.L+G.pw,e.clientX-cv.getBoundingClientRect().left)),s=ds;ds=null;sel.style.display='none';
+ if(Math.abs(x-s)>4){const f=p=>G.x0+(p-G.L)/G.pw*(G.x1-G.x0);setWin(f(Math.min(s,x)),f(Math.max(s,x)));go()}});
+new ResizeObserver(go).observe($('main'));matchMedia('(prefers-color-scheme:dark)').onchange=go;
+
+/* ---------- export ---------- */
+function dl(b,n){const u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=n;a.click();setTimeout(()=>URL.revokeObjectURL(u),1e3)}
+$('#png').onclick=()=>{draw();cv.toBlob(b=>dl(b,'plot.png'))};
+$('#csv').onclick=()=>{
+ if(!D)return;const x=xcol(),cs=[x,...ycols(),gcol()].filter(Boolean);
+ const q=v=>/[",\n]/.test(v=String(v))?'"'+v.replace(/"/g,'""')+'"':v;
+ const o=[['row',...cs.map(c=>c.name)].map(q).join(',')];
+ for(let i=0;i<D.n;i++){const xv=x?x.v[i]:i;if(!(xv>=lo&&xv<=hi))continue;
+  o.push([i,...cs.map(c=>c.s?c.s[i]:c.v[i]!==c.v[i]?'':c.kind=='time'?new Date(c.v[i]).toISOString():c.v[i])].map(q).join(','))}
+ dl(new Blob([o.join('\n')],{type:'text/csv'}),'window.csv');
+};
+
+/* ---------- files on the server (only when served by the container) ---------- */
+fetch('/api/files').then(r=>r.json()).then(f=>{if(!f.length)return;$('#srv').hidden=false;
+ $('#sf').innerHTML='<option value="">Choose a file</option>'+f.map(n=>`<option value="${esc(n.name)}">${esc(n.name)} (${(n.size/1e6).toFixed(1)} MB)</option>`).join('')}).catch(()=>{});
+$('#sf').onchange=async e=>{const n=e.target.value;if(!n)return;
+ if(/\.(h5|hdf5)$/i.test(n))return info('HDF5 files are not supported yet. Export the data to CSV first.');
+ info('Loading '+n+'...');const r=await fetch('/data/'+n.split('/').map(encodeURIComponent).join('/'));load(n,await r.text())};
+draw();
+</script></body></html>
