@@ -21,16 +21,21 @@ button:hover{border-color:var(--ac)}.pri{background:var(--ac);border-color:var(-
 .ck{display:flex;gap:7px;align-items:center;color:var(--tx);font-weight:400;padding:2px 0;cursor:pointer}
 .row{display:flex;gap:6px}
 input[type=range]{width:100%;accent-color:var(--ac)}
-main{position:relative;min-width:0}
-#cv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
-#sel{position:absolute;display:none;background:color-mix(in srgb,var(--ac) 20%,transparent);border:1px solid var(--ac);pointer-events:none}
+main{overflow:auto;min-width:0;padding-bottom:12px}
+.card{background:var(--pn);border:1px solid var(--bd);border-radius:8px;margin:12px 12px 0}
+.card.on{border-color:var(--ac);box-shadow:0 0 0 1px var(--ac)}
+.ch{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;color:var(--mu);font-size:13px}
+.ch button{padding:2px 8px;font-size:12px}
+.cw{position:relative}.cw canvas{width:100%;height:380px;display:block;cursor:crosshair}
+.sel{position:absolute;display:none;background:color-mix(in srgb,var(--ac) 20%,transparent);border:1px solid var(--ac);pointer-events:none}
+.tip{position:absolute;display:none;pointer-events:none;background:var(--tx);color:var(--pn);padding:4px 8px;border-radius:4px;font-size:12px;white-space:nowrap;z-index:2}
 @media(max-width:800px){body{grid-template-columns:1fr;grid-template-rows:auto 70vh;height:auto}}
 </style></head><body>
 <aside>
 <h1>Plotter</h1>
 <section>
  <div id="drop" tabindex="0">Drop a CSV, TSV or JSON file<br><small>or click to browse</small></div>
- <input type="file" id="file" hidden>
+ <input type="file" id="file" hidden><button id="smp">Try sample data</button>
  <div id="srv" hidden><label for="sf">Files on the server</label><select id="sf"></select></div>
  <div id="info"></div>
 </section>
@@ -54,15 +59,18 @@ main{position:relative;min-width:0}
  <label class="ck"><input type="checkbox" id="lg"> Log scale on Y</label>
  <label for="bn">Histogram bins</label><input id="bn" type="number" value="30" min="2" max="500">
 </section>
-<button id="go" class="pri">Generate chart</button>
+<label class="ck"><input type="checkbox" id="lk"> Link X windows across graphs</label><button id="add" class="pri">+ Add graph (copy of this one)</button><button id="go">Generate graph</button><small style="color:var(--mu)">Click any graph to edit it in this panel.</small>
 <div class="row"><button id="png" style="flex:1">Save PNG</button><button id="csv" style="flex:1">Save window as CSV</button></div>
 </aside>
-<main><canvas id="cv"></canvas><div id="sel"></div></main>
+<main id="stack"></main>
 <script>
 const $=s=>document.querySelector(s),PAL=['#0e7c86','#e8590c','#5c7cfa','#2f9e44','#ae3ec9','#f08c00','#c92a2a','#495057','#12b886'];
 const esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
-let D=null,lo=0,hi=1,xr=[0,1],G={},ds=null,raf;
-const go=()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(draw)};
+const dc=()=>({x:-1,ys:[],g:-1,type:'line',lo:0,hi:1,xr:[0,1],title:'',log:false,bins:30});
+let D=null,CF=dc(),G={},ds=null,dcv=null,raf,charts=[],act=null;
+Object.defineProperties(window,{lo:{get:()=>CF.lo,set:v=>CF.lo=v},hi:{get:()=>CF.hi,set:v=>CF.hi=v},xr:{get:()=>CF.xr,set:v=>CF.xr=v}});
+const go=()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(()=>{if(!act)return;if(D)read();const k=$('#lk').checked&&D;
+ charts.forEach(c=>{if(c===act)draw(c);else if(k&&c.cfg.x==CF.x){c.cfg.lo=CF.lo;c.cfg.hi=CF.hi;draw(c)}})})};
 const info=t=>$('#info').textContent=t;
 
 /* ---------- parsing ---------- */
@@ -113,7 +121,8 @@ function load(name,text){
  const yi=C.findIndex((c,i)=>c.kind=='num'&&i!=xi);
  $('#ys').innerHTML=C.map((c,i)=>c.kind=='num'?`<label class="ck"><input type="checkbox" value="${i}"${i==yi?' checked':''}> ${esc(c.name)}</label>`:'').join('');
  info(`${name}: ${D.n.toLocaleString()} rows, ${C.length} columns`);
- calcXR();go();
+ charts.forEach(c=>c.el.remove());charts=[];
+ const c0=dc();c0.x=xi;c0.ys=yi>=0?[yi]:[];addChart(c0);calcXR();go();
 }
 async function openF(f){
  if(/\.(h5|hdf5|hdf)$/i.test(f.name))return info('HDF5 files are not supported yet. Export the data to CSV first.');
@@ -121,9 +130,9 @@ async function openF(f){
 }
 
 /* ---------- selection helpers ---------- */
-const xcol=()=>{const i=+$('#x').value;return i<0||!D?null:D.cols[i]};
-const gcol=()=>{const i=+$('#g').value;return i<0||!D?null:D.cols[i]};
-const ycols=()=>[...document.querySelectorAll('#ys input:checked')].map(e=>D.cols[+e.value]);
+const xcol=()=>{const i=CF.x;return i<0||!D?null:D.cols[i]};
+const gcol=()=>{const i=CF.g;return i<0||!D?null:D.cols[i]};
+const ycols=()=>CF.ys.map(i=>D.cols[i]);
 const fw=v=>{const x=xcol();return x&&x.kind=='time'?new Date(v).toISOString().slice(0,19)+'Z':''+ +v.toPrecision(10)};
 const pv=s=>{const x=xcol();return x&&x.kind=='time'?pd(s):+s};
 function setWin(a,b){lo=a;hi=b;$('#lo').value=fw(a);$('#hi').value=fw(b);const w=xr[1]-xr[0];$('#sl').value=(a-xr[0])/w*1000;$('#sh').value=(b-xr[0])/w*1000}
@@ -159,8 +168,10 @@ function decim(X,Y,x0,x1,w){
  fl();return[ox,oy];
 }
 const qt=(a,p)=>{const i=(a.length-1)*p,f=Math.floor(i);return a[f]+(a[Math.min(f+1,a.length-1)]-a[f])*(i-f)};
-function draw(){
- const cv=$('#cv'),W=cv.clientWidth,H=cv.clientHeight,dp=devicePixelRatio||1;
+function draw(ch){if(!ch)return;const p=CF;CF=ch.cfg;try{_draw(ch)}finally{CF=p}
+ ch.G=G;ch.el.querySelector('.ch span').textContent='Graph '+(charts.indexOf(ch)+1)}
+function _draw(ch){
+ const cv=ch.cv,W=cv.clientWidth,H=cv.clientHeight,dp=devicePixelRatio||1;
  cv.width=W*dp;cv.height=H*dp;const c=cv.getContext('2d');c.setTransform(dp,0,0,dp,0,0);
  const st=getComputedStyle(document.body),V=n=>st.getPropertyValue(n).trim(),tx=V('--tx'),mu=V('--mu'),gr=V('--gr');
  c.fillStyle=V('--pn');c.fillRect(0,0,W,H);
@@ -170,9 +181,9 @@ function draw(){
  const S=series();
  if(!S.length)return say('Pick at least one Y column');
  if(S.every(s=>!s.X.length))return say('No data inside this window. Reset the window to see everything.');
- const type=$('#type').value,log=$('#lg').checked&&type!='hist',title=$('#ti').value,xc=xcol();
+ const type=CF.type,log=CF.log&&type!='hist',title=CF.title,xc=xcol();
  const L=72,R=20,T=title?44:22,B=50,pw=W-L-R,ph=H-T-B,ty=v=>log?Math.log10(v):v;
- let x0=lo,x1=hi,y0=Infinity,y1=-Infinity,box=[],hist=[],nb=Math.max(2,Math.min(500,+$('#bn').value||30));
+ let x0=lo,x1=hi,y0=Infinity,y1=-Infinity,box=[],hist=[],nb=Math.max(2,Math.min(500,+CF.bins||30));
  const ext=v=>{if(log&&v<=0)return;v=ty(v);if(v<y0)y0=v;if(v>y1)y1=v};
  if(type=='hist'){
   let a=Infinity,b=-Infinity;for(const s of S)for(const v of s.Y){if(v<a)a=v;if(v>b)b=v}
@@ -192,7 +203,7 @@ function draw(){
  if(type!='hist'){if(y0===y1){y0-=1;y1+=1}const p=(y1-y0)*.05;y0-=p;y1+=p}
  const px=v=>L+(v-x0)/(x1-x0)*pw,py=v=>T+ph-(ty(v)-y0)/(y1-y0)*ph;
  G={L,T,pw,ph,x0,x1,type,zoom:!/^(hist|box)$/.test(type)};
- const sp=x1-x0,fx=type!='hist'&&xc&&xc.kind=='time'?v=>tm(v,sp):fmt;
+ const sp=x1-x0,fx=type!='hist'&&xc&&xc.kind=='time'?v=>tm(v,sp):fmt;G.px=px;G.py=py;G.fx=fx;G.S=S;
  c.font='12px system-ui,sans-serif';c.lineWidth=1;c.strokeStyle=gr;c.fillStyle=mu;c.textAlign='right';c.textBaseline='middle';
  for(const t of ticks(y0,y1,Math.max(2,ph/50|0))){const y=T+ph-(t-y0)/(y1-y0)*ph;c.beginPath();c.moveTo(L,y);c.lineTo(L+pw,y);c.stroke();c.fillText(fmt(log?10**t:t),L-8,y)}
  c.textAlign='center';c.textBaseline='top';
@@ -236,24 +247,57 @@ $('#file').onchange=e=>e.target.files[0]&&openF(e.target.files[0]);
 dz.ondragover=e=>{e.preventDefault();dz.classList.add('on')};dz.ondragleave=()=>dz.classList.remove('on');
 dz.ondrop=e=>{e.preventDefault();dz.classList.remove('on');e.dataTransfer.files[0]&&openF(e.dataTransfer.files[0])};
 ['type','g','lg','bn','ti'].forEach(id=>$('#'+id).oninput=go);
-$('#ys').onchange=go;$('#go').onclick=draw;
-$('#x').onchange=()=>{calcXR();go()};
-$('#rs').onclick=cv_reset;$('#cv').ondblclick=cv_reset;
+$('#ys').onchange=go;$('#go').onclick=go;
+$('#x').onchange=()=>{CF.x=+$('#x').value;calcXR();go()};
+$('#rs').onclick=cv_reset;$('#stack').ondblclick=e=>e.target.tagName=='CANVAS'&&cv_reset();
 function cv_reset(){if(D){setWin(xr[0],xr[1]);go()}}
 $('#q').oninput=e=>{const s=e.target.value.toLowerCase();document.querySelectorAll('#ys .ck').forEach(l=>l.hidden=!l.textContent.toLowerCase().includes(s))};
 $('#lo').onchange=$('#hi').onchange=()=>{const a=pv($('#lo').value),b=pv($('#hi').value);if(isNaN(a)||isNaN(b)||a>=b)return setWin(lo,hi);setWin(a,b);go()};
 $('#sl').oninput=$('#sh').oninput=()=>{const w=xr[1]-xr[0];let a=xr[0]+w*$('#sl').value/1000,b=xr[0]+w*$('#sh').value/1000;if(a>b)[a,b]=[b,a];lo=a;hi=b;$('#lo').value=fw(a);$('#hi').value=fw(b);go()};
-const cv=$('#cv'),sel=$('#sel');
-cv.onmousedown=e=>{const x=e.clientX-cv.getBoundingClientRect().left;if(G.zoom&&x>=G.L&&x<=G.L+G.pw)ds=x};
-addEventListener('mousemove',e=>{if(ds==null)return;const x=Math.max(G.L,Math.min(G.L+G.pw,e.clientX-cv.getBoundingClientRect().left));
- Object.assign(sel.style,{display:'block',left:Math.min(ds,x)+'px',width:Math.abs(x-ds)+'px',top:G.T+'px',height:G.ph+'px'})});
-addEventListener('mouseup',e=>{if(ds==null)return;const x=Math.max(G.L,Math.min(G.L+G.pw,e.clientX-cv.getBoundingClientRect().left)),s=ds;ds=null;sel.style.display='none';
- if(Math.abs(x-s)>4){const f=p=>G.x0+(p-G.L)/G.pw*(G.x1-G.x0);setWin(f(Math.min(s,x)),f(Math.max(s,x)));go()}});
-new ResizeObserver(go).observe($('main'));matchMedia('(prefers-color-scheme:dark)').onchange=go;
+function read(){CF.type=$('#type').value;CF.x=+$('#x').value;CF.g=+$('#g').value;CF.title=$('#ti').value;CF.log=$('#lg').checked;CF.bins=+$('#bn').value||30;
+ CF.ys=[...document.querySelectorAll('#ys input:checked')].map(e=>+e.value)}
+function fill(){if(!D)return;$('#type').value=CF.type;$('#x').value=CF.x;$('#g').value=CF.g;$('#ti').value=CF.title;$('#lg').checked=CF.log;$('#bn').value=CF.bins;
+ document.querySelectorAll('#ys input').forEach(e=>e.checked=CF.ys.includes(+e.value));setWin(CF.lo,CF.hi)}
+function activate(ch){act=ch;CF=ch.cfg;charts.forEach(c=>c.el.classList.toggle('on',c===ch));fill()}
+function addChart(cfg){
+ const el=document.createElement('div');el.className='card';
+ el.innerHTML='<div class="ch"><span></span><button>Remove</button></div><div class="cw"><canvas></canvas><div class="sel"></div><div class="tip"></div></div>';
+ $('#stack').appendChild(el);
+ const ch={cfg,el,cv:el.querySelector('canvas'),sel:el.querySelector('.sel'),tip:el.querySelector('.tip'),G:{}};
+ charts.push(ch);
+ el.onmousedown=()=>act!==ch&&activate(ch);
+ el.querySelector('button').onclick=()=>{if(charts.length<2)return;el.remove();charts.splice(charts.indexOf(ch),1);if(act===ch)activate(charts[charts.length-1]);charts.forEach(draw)};
+ activate(ch);new ResizeObserver(()=>draw(ch)).observe(ch.cv);return ch;
+}
+$('#add').onclick=()=>{if(!D)return info('Load a data file first.');read();addChart(JSON.parse(JSON.stringify(CF))).el.scrollIntoView({behavior:'smooth',block:'nearest'})};
+$('#smp').onclick=()=>{const r=['timestamp,time_s,position_m,velocity_m_s,temperature_c,sensor'];let p=0;
+ for(let i=0;i<5000;i++){const t=i*.5,b=i%3,v=10*Math.sin(t/80)+b*.8+(Math.random()-.5)*.6;p+=v*.5;
+  r.push([new Date(Date.UTC(2026,0,1)+t*1e3).toISOString().slice(0,19)+'Z',t,p.toFixed(3),v.toFixed(3),(20+t/400+2*Math.sin(t/300)+b*1.5+Math.random()).toFixed(2),'ABC'[b]].join(','))}
+ load('sample.csv',r.join('\n'))};
+$('#stack').onmousedown=e=>{if(e.target.tagName!='CANVAS')return;dcv=charts.find(c=>c.cv===e.target);dcv.tip.style.display='none';
+ const g=dcv.G,x=e.clientX-e.target.getBoundingClientRect().left;ds=g.zoom&&x>=g.L&&x<=g.L+g.pw?x:null};
+const cx=e=>{const g=dcv.G;return Math.max(g.L,Math.min(g.L+g.pw,e.clientX-dcv.cv.getBoundingClientRect().left))};
+addEventListener('mousemove',e=>{if(ds==null)return;const g=dcv.G,x=cx(e);
+ Object.assign(dcv.sel.style,{display:'block',left:Math.min(ds,x)+'px',width:Math.abs(x-ds)+'px',top:g.T+'px',height:g.ph+'px'})});
+addEventListener('mouseup',e=>{if(ds==null)return;const g=dcv.G,x=cx(e),s=ds;ds=null;dcv.sel.style.display='none';
+ if(Math.abs(x-s)>4){const f=q=>g.x0+(q-g.L)/g.pw*(g.x1-g.x0);setWin(f(Math.min(s,x)),f(Math.max(s,x)));go()}});
+$('#stack').onmousemove=e=>{
+ if(ds!=null||e.target.tagName!='CANVAS')return;
+ const ch=charts.find(c=>c.cv===e.target),g=ch.G,r=ch.cv.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+ ch.tip.style.display='none';
+ if(!g.zoom||!g.S||mx<g.L||mx>g.L+g.pw||my<g.T||my>g.T+g.ph)return;
+ let best=null,bd=900;
+ for(const s of g.S){if(s.X.length>3e5)continue;for(let j=0;j<s.X.length;j++){const dx=g.px(s.X[j])-mx;if(dx*dx>bd)continue;const dy=g.py(s.Y[j])-my,d=dx*dx+dy*dy;if(d<bd){bd=d;best=[s,j]}}}
+ if(!best)return;const[s,j]=best;
+ ch.tip.textContent=s.name+': '+g.fx(s.X[j])+', '+fmt(s.Y[j]);
+ Object.assign(ch.tip.style,{display:'block',left:Math.min(g.px(s.X[j])+10,r.width-190)+'px',top:Math.max(0,g.py(s.Y[j])-30)+'px'});
+};
+$('#stack').onmouseleave=()=>charts.forEach(c=>c.tip.style.display='none');
+matchMedia('(prefers-color-scheme:dark)').onchange=()=>charts.forEach(draw);
 
 /* ---------- export ---------- */
 function dl(b,n){const u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=n;a.click();setTimeout(()=>URL.revokeObjectURL(u),1e3)}
-$('#png').onclick=()=>{draw();cv.toBlob(b=>dl(b,'plot.png'))};
+$('#png').onclick=()=>{draw(act);act.cv.toBlob(b=>dl(b,'plot.png'))};
 $('#csv').onclick=()=>{
  if(!D)return;const x=xcol(),cs=[x,...ycols(),gcol()].filter(Boolean);
  const q=v=>/[",\n]/.test(v=String(v))?'"'+v.replace(/"/g,'""')+'"':v;
@@ -269,5 +313,5 @@ fetch('/api/files').then(r=>r.json()).then(f=>{if(!f.length)return;$('#srv').hid
 $('#sf').onchange=async e=>{const n=e.target.value;if(!n)return;
  if(/\.(h5|hdf5)$/i.test(n))return info('HDF5 files are not supported yet. Export the data to CSV first.');
  info('Loading '+n+'...');const r=await fetch('/data/'+n.split('/').map(encodeURIComponent).join('/'));load(n,await r.text())};
-draw();
+addChart(dc());
 </script></body></html>
